@@ -1,4 +1,3 @@
-# langgraph_frontend.py
 import streamlit as st
 from datetime import datetime
 import time
@@ -37,20 +36,17 @@ if GEMINI_API_KEY:
 def is_guest_mode():
     return not st.session_state.get("logged_in", False)
 
+
 def if_logged_in(func, *args, **kwargs):
     if not is_guest_mode():
         return func(*args, **kwargs)
 
-# ——————— DIALOG TRIGGER HELPERS ———————
 def trigger_dialog(flag_key: str):
-    """
-    Call this instead of directly calling show_xxx_dialog()
-    It opens the dialog once and immediately clears the flag.
-    """
     if st.session_state.get(flag_key):
-        del st.session_state[flag_key]   # clear so it won't reopen
+        del st.session_state[flag_key]  
         return True
     return False
+
 
 # Guest in-memory storage
 if is_guest_mode() and "guest_messages" not in st.session_state:
@@ -90,6 +86,17 @@ def download_image(img_pil: Image.Image, prefix: str = "novachat"):
         use_container_width=True,
         type="primary",
     )
+
+
+def thread_belongs_to_user(thread_id: str, user_id: int) -> bool:
+    """Return True if the thread really belongs to the logged-in user."""
+    if not thread_id or is_guest_mode():
+        return True
+    cur = conn.execute(
+        "SELECT 1 FROM threads WHERE thread_id = ? AND user_id = ?",
+        (thread_id, user_id),
+    )
+    return cur.fetchone() is not None
 
 
 def generate_title(conv):
@@ -206,41 +213,99 @@ if not st.session_state.get("logged_in", False):
 user = st.session_state.get("user")
 user_id = user.get("id") if user else None  # make sure your signin sets 'id'
 username = user.get("username") if user else None
-first_name=user.get("first_name") if user else None
+first_name = user.get("first_name") if user else None
 
 
+# === FIXED USER & THREAD LOGIC ===
+# ==================== FINAL WORKING USER & THREAD LOGIC ====================
 if is_guest_mode():
-    if "guest_user_id" not in st.session_state:
-        st.session_state.guest_user_id = f"guest_{uuid.uuid4()}"
-    user_id = st.session_state.guest_user_id
+    # ───── GUEST MODE ─────
     username = "Guest"
-else:
-    if not username:
-        username = "User"
-current_thread_id = st.session_state.thread_id
+    user_id = "guest"  # we don’t need a UUID
 
+    # One single in-memory thread for the whole guest session
+    if "thread_id" not in st.session_state or not st.session_state.thread_id:
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.guest_messages = []  # reset messages
+
+    current_thread_id = st.session_state.thread_id
+
+else:
+    # ───── LOGGED-IN USER ─────
+    user = st.session_state.user
+    user_id = user["id"]
+    username = user.get("username", "User")
+    first_name = user.get("first_name", "") or ""
+
+    # If we are coming from a guest thread OR the current thread does NOT belong to this user → start fresh
+    needs_new_thread = (
+        "thread_id" not in st.session_state
+        or
+        # first time after login
+        not st.session_state.thread_id
+        or st.session_state.thread_id.startswith("guest_")
+        or not thread_belongs_to_user(st.session_state.thread_id, user_id)
+    )
+
+    if needs_new_thread:
+        new_thread_id = str(uuid.uuid4())
+        create_thread(new_thread_id, user_id, "New Chat")
+        st.session_state.thread_id = new_thread_id
+        st.session_state.title_generated = False
+        # IMPORTANT: clear any leftover guest messages so they don’t appear after login
+        st.session_state.guest_messages = []
+
+    current_thread_id = st.session_state.thread_id
 
 if not is_guest_mode():
     with st.sidebar:
         st.success(f"Logged in as **{username}**")
-        with st.expander("My Account",icon=':material/person:',):
-            if st.button("View Profile", use_container_width=True, type="secondary", icon=":material/visibility:"):
+        with st.expander(
+            "My Account",
+            icon=":material/person:",
+        ):
+            if st.button(
+                "View Profile",
+                use_container_width=True,
+                type="secondary",
+                icon=":material/visibility:",
+            ):
                 show_view_profile_dialog()
 
-            if st.button("Edit Profile", use_container_width=True, type="secondary", icon=":material/edit:"):
+            if st.button(
+                "Edit Profile",
+                use_container_width=True,
+                type="secondary",
+                icon=":material/edit:",
+            ):
                 show_edit_profile_dialog()
 
-            if st.button("Change Password", use_container_width=True, type="secondary", icon=":material/lock_reset:"):
+            if st.button(
+                "Change Password",
+                use_container_width=True,
+                type="secondary",
+                icon=":material/lock_reset:",
+            ):
                 show_change_password_dialog()
 
-            if st.button("Logout", use_container_width=True, type="secondary", icon=":material/logout:"):
+            if st.button(
+                "Logout",
+                use_container_width=True,
+                type="secondary",
+                icon=":material/logout:",
+            ):
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.rerun()
 
 
-
-if st.sidebar.button("New Chat", use_container_width=True, key="new_chat", type="primary",icon=':material/chat_add_on:'):
+if st.sidebar.button(
+    "New Chat",
+    use_container_width=True,
+    key="new_chat",
+    type="primary",
+    icon=":material/chat_add_on:",
+):
     new_id = str(uuid.uuid4())
     create_thread(new_id, user_id, "New Chat")
     st.session_state.thread_id = new_id
@@ -255,26 +320,15 @@ if st.sidebar.button("New Chat", use_container_width=True, key="new_chat", type=
 st.sidebar.markdown("---")
 if "selected_mode" not in st.session_state:
     st.session_state.selected_mode = "Chat"
-
-# Sync radio with session state
-# MODE = st.sidebar.radio(
-#     "Mode",
-#     options=["Chat", "Text to Image", "Image to Text", "Image to Image"],
-#     index=["Chat", "Text to Image", "Image to Text", "Image to Image"].index(
-#         st.session_state.selected_mode
-#     ),
-#     horizontal=True,
-#     key="mode_selector",
-#     width="stretch",
 # )
 MODES = ["Chat", "GENERATE IMAGE", "GENERATE CAPTION"]
 
 MODE = st.sidebar.pills(
     "Mode",
     options=MODES,
-    default=st.session_state.selected_mode, 
+    default=st.session_state.selected_mode,
     key="mode_selector",
-    width='stretch'
+    width="stretch",
 )
 
 
@@ -347,8 +401,11 @@ else:
 
 if _msg_count(current_thread_id) == 0:
     st.markdown('<h1 class="main-novachat-title">NovaChat</h1>', unsafe_allow_html=True)
-    if  not is_guest_mode():
-        st.markdown(f'<h2 class="main-novachat-title">Hi {first_name.capitalize()}</h2>', unsafe_allow_html=True)
+    if not is_guest_mode():
+        st.markdown(
+            f'<h2 class="main-novachat-title">Hi {first_name.capitalize()}</h2>',
+            unsafe_allow_html=True,
+        )
 
     st.markdown(
         '<h1 class="main-novachat-title" >What’s on your mind today?</h1>',
@@ -380,7 +437,9 @@ for i, msg in enumerate(st.session_state.cached_msgs):
             img_data = base64.b64decode(msg["media_b64"])
             img = Image.open(io.BytesIO(img_data))
             st.image(img, use_container_width=True)
-            if st.button("", key=f"save_hist_{i}_{current_thread_id}",icon=':material/save_alt:'):
+            if st.button(
+                "", key=f"save_hist_{i}_{current_thread_id}", icon=":material/save_alt:"
+            ):
                 download_image(img, prefix="chat_image")
 
 # Delete Confirmation (above input)
@@ -415,63 +474,61 @@ if st.session_state.confirm_delete and not is_guest_mode():
     delete_dialog_body(tid)
 # Chat Input
 if st.session_state.selected_mode == "Chat":
-  if prompt := st.chat_input("Ask anything..."):
+    if prompt := st.chat_input("Ask anything..."):
 
-    append_message(current_thread_id, "user", prompt)
-    st.session_state.cached_msgs.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+        append_message(current_thread_id, "user", prompt)
+        st.session_state.cached_msgs.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    if not st.session_state.title_generated:
-        title = generate_title(st.session_state.cached_msgs)
-        set_thread_title(current_thread_id, title)
-        st.session_state.title_generated = True
+        if not st.session_state.title_generated:
+            title = generate_title(st.session_state.cached_msgs)
+            set_thread_title(current_thread_id, title)
+            st.session_state.title_generated = True
 
-    with st.chat_message("assistant"):
-        thinking = st.empty()
-        thinking.markdown("*Thinking...*")
+        with st.chat_message("assistant"):
+            thinking = st.empty()
+            thinking.markdown("*Thinking...*")
 
-    
-        typewriter = st.empty()
+            typewriter = st.empty()
 
-        full_response = ""
+            full_response = ""
 
-        try:
-            for chunk in chatbot.stream(
-                {"messages": [HumanMessage(content=prompt)]},
-                config=CONFIG,
-                stream_mode="messages",
-            ):
-                if not chunk:
-                    continue
+            try:
+                for chunk in chatbot.stream(
+                    {"messages": [HumanMessage(content=prompt)]},
+                    config=CONFIG,
+                    stream_mode="messages",
+                ):
+                    if not chunk:
+                        continue
 
-                msg_chunk = chunk[0][0] if isinstance(chunk[0], tuple) else chunk[0]
+                    msg_chunk = chunk[0][0] if isinstance(chunk[0], tuple) else chunk[0]
 
-                if getattr(msg_chunk, "content", None):
-                    delta = msg_chunk.content
-                    full_response += delta
-                    typewriter.markdown(full_response + "▋")
+                    if getattr(msg_chunk, "content", None):
+                        delta = msg_chunk.content
+                        full_response += delta
+                        typewriter.markdown(full_response + "▋")
 
-        except Exception as e:
-            st.error(f"Chat error: {e}")
-            full_response = "Sorry, something went wrong."
+            except Exception as e:
+                st.error(f"Chat error: {e}")
+                full_response = "Sorry, something went wrong."
 
-        finally:
-            thinking.empty()
+            finally:
+                thinking.empty()
 
-        append_message(current_thread_id, "assistant", full_response)
-        st.session_state.cached_msgs.append(
-            {"role": "assistant", "content": full_response}
-        )
+            append_message(current_thread_id, "assistant", full_response)
+            st.session_state.cached_msgs.append(
+                {"role": "assistant", "content": full_response}
+            )
 
+            if full_response.strip():
+                for i in range(len(full_response) + 1):
+                    typewriter.markdown(full_response[:i] + "▋")
+                    time.sleep(0.005)
+                typewriter.markdown(full_response)
 
-        if full_response.strip():
-            for i in range(len(full_response) + 1):
-                typewriter.markdown(full_response[:i] + "▋")
-                time.sleep(0.005)
-            typewriter.markdown(full_response)
-
-    st.rerun()
+        st.rerun()
 
 
 elif st.session_state.selected_mode == "GENERATE IMAGE":
